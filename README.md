@@ -1,4 +1,4 @@
-# ⚪ Marble Blast GH
+# ⚪ Marble Readme
 
 ![Current Position](./frame.png)
 
