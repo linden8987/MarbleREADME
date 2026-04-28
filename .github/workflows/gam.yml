@@ -1,0 +1,41 @@
+name: Marble Physics Engine
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  update_game:
+    # Only runs if the issue title is a move command (e.g., move:up)
+    if: startsWith(github.event.issue.title, 'move:')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Run Physics Simulation
+        run: |
+          # Pass the move title to the script
+          python engine/physics.py "${{ github.event.issue.title }}"
+
+      - name: Update README with New State
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md state.json frame.png
+          git commit -m "Marble updated: ${{ github.event.issue.title }}"
+          git push
+
+      - name: Close Game Trigger Issue
+        run: gh issue close ${{ github.event.issue.number }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
