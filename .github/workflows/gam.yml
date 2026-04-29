@@ -1,41 +1,112 @@
-name: Marble Physics Engine
+name: Update Marble Position
 
 on:
-  issues:
-    types: [opened]
+  repository_dispatch:
+    types: [move_north, move_south, jump]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'move_north'
+        type: choice
+        options:
+          - move_north
+          - move_south
+          - jump
 
 jobs:
-  update_game:
-    # Only runs if the issue title is a move command (e.g., move:up)
-    if: startsWith(github.event.issue.title, 'move:')
+  update-marble:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      issues: write
-
+    
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          python-version: '3.x'
+          node-version: '20'
 
-      - name: Run Physics Simulation
+      - name: Calculate New Position
+        id: physics
         run: |
-          # Pass the move title to the script
-          python engine/physics.py "${{ github.event.issue.title }}"
+          sudo apt-get install -y bc
 
-      - name: Update README with New State
+          if [ -f ".marble_state.json" ]; then
+            X=$(jq -r '.x // 0' .marble_state.json)
+            Y=$(jq -r '.y // 0' .marble_state.json)
+            Z=$(jq -r '.z // 0' .marble_state.json)
+          else
+            X=0
+            Y=0
+            Z=0
+          fi
+
+          ACTION="${{ github.event.action || github.event.client_payload.action || github.event.inputs.action }}"
+          
+          # Reset Y (gravity) unless jumping
+          NEW_Y=0
+
+          if [ "$ACTION" == "move_north" ]; then
+            Z=$(echo "$Z - 1.5" | bc)
+          elif [ "$ACTION" == "move_south" ]; then
+            Z=$(echo "$Z + 1.5" | bc)
+          elif [ "$ACTION" == "jump" ]; then
+            NEW_Y=2.0
+          fi
+          
+          echo "NEW_X=$X" >> $GITHUB_OUTPUT
+          echo "NEW_Y=$NEW_Y" >> $GITHUB_OUTPUT
+          echo "NEW_Z=$Z" >> $GITHUB_OUTPUT
+          echo "{\"x\": $X, \"y\": $NEW_Y, \"z\": $Z}" > .marble_state.json
+
+      - name: Generate New Frame via Gemini
+        shell: bash
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          PROMPT="A high-quality 3D render of a white marble sphere on a dark GitHub-themed grid platform. The marble is at coordinates (x:${{ steps.physics.outputs.NEW_X }}, y:${{ steps.physics.outputs.NEW_Y }}, z:${{ steps.physics.outputs.NEW_Z }}). Minimalist aesthetic, soft studio lighting, isometric view, dark mode colors. If y is greater than 0, the marble is floating."
+          
+          RESPONSE=$(curl -X POST "https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key=${GEMINI_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"instances\": [ { \"prompt\": \"$PROMPT\" } ],
+              \"parameters\": { \"sampleCount\": 1 }
+            }")
+          
+          echo $RESPONSE | jq -r '.predictions[0].bytesBase64Encoded' | base64 -d > frame.png
+
+      - name: Update README
+        run: |
+          REPO_URL="https://github.com/${{ github.repository }}"
+          # Create dispatch links (requires a Personal Access Token or a specific App for external users, 
+          # but for the owner, workflow_dispatch URLs can be used or instructions provided)
+          
+          cat <<EOF > README.md
+          # Marble World: A README Game
+
+          ![Current Frame](frame.png)
+
+          ### Controls
+          | [Move North]($REPO_URL/actions) | [Jump]($REPO_URL/actions) | [Move South]($REPO_URL/actions) |
+          | :---: | :---: | :---: |
+
+          **Current Position:**
+          - **X:** ${{ steps.physics.outputs.NEW_X }}
+          - **Y:** ${{ steps.physics.outputs.NEW_Y }}
+          - **Z:** ${{ steps.physics.outputs.NEW_Z }}
+
+          ---
+          *Powered by GitHub Actions & Gemini Imagen-4*
+          EOF
+
+      - name: Commit and Push Changes
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add README.md state.json frame.png
-          git commit -m "Marble updated: ${{ github.event.issue.title }}"
+          git add frame.png .marble_state.json README.md
+          git commit -m "Marble moved to (${{ steps.physics.outputs.NEW_X }}, ${{ steps.physics.outputs.NEW_Y }}, ${{ steps.physics.outputs.NEW_Z }})"
           git push
-
-      - name: Close Game Trigger Issue
-        run: gh issue close ${{ github.event.issue.number }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
