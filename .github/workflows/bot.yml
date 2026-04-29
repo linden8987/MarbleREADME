@@ -1,49 +1,24 @@
-name: Marble Repair Bot
-
-on:
-  # Runs every 6 hours to check health
-  schedule:
-    - cron: '0 */6 * * *'
-  # Allows you to trigger a manual repair from the Actions tab
-  workflow_dispatch:
-
-jobs:
-  diagnose-and-fix:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
       - name: Health Check
         id: repair
         run: |
           REPAIRED=false
 
-          # 1. Fix Corrupted or Missing State JSON
-          if [ ! -f ".marble_state.json" ] || ! jq . .marble_state.json > /dev/null 2>&1; then
+          # 1. Check if JSON is actually valid and has coordinates
+          if [ ! -f ".marble_state.json" ] || ! jq -e '.x' .marble_state.json > /dev/null 2>&1; then
             echo '{"x": 4, "z": 4, "status": "playing"}' > .marble_state.json
             REPAIRED=true
-            echo "FIX_LOG=State file was missing or corrupted. Reset to center." >> $GITHUB_OUTPUT
+            echo "LOG=Reset corrupted JSON." >> $GITHUB_OUTPUT
           fi
 
-          # 2. Fix Missing README
-          if [ ! -f "README.md" ]; then
-            echo "# 🕹️ Marble Game" > README.md
-            echo "The Repair Bot restored this file. Please move to regenerate the grid." >> README.md
+          # 2. Check if README is missing OR doesn't contain the game grid
+          # If the file exists but doesn't have a marble, it's a "blank" game.
+          if [ ! -f "README.md" ] || ! grep -q "⚪" README.md; then
+            echo "# 🕹️ Marble Game (Restored)" > README.md
+            echo "The bot detected a broken screen and reset it. Move to play!" >> README.md
+            # We delete the JSON to force the next move to start from center
+            echo '{"x": 4, "z": 4, "status": "playing"}' > .marble_state.json
             REPAIRED=true
-            echo "FIX_LOG=README was missing. Restored base file." >> $GITHUB_OUTPUT
+            echo "LOG=README was blank or broken. Resetting game." >> $GITHUB_OUTPUT
           fi
 
           echo "WAS_REPAIRED=$REPAIRED" >> $GITHUB_OUTPUT
-
-      - name: Commit Repairs
-        if: steps.repair.outputs.WAS_REPAIRED == 'true'
-        run: |
-          git config --global user.name "marble-repair-bot"
-          git config --global user.email "bot@github.com"
-          git add .
-          git commit -m "🤖 REPAIR BOT: ${{ steps.repair.outputs.FIX_LOG }}"
-          git push
