@@ -1,0 +1,112 @@
+name: Update Marble Position
+
+on:
+  repository_dispatch:
+    types: [move_north, move_south, move_east, move_west, jump]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action'
+        required: true
+        default: 'move_north'
+        type: choice
+        options: [move_north, move_south, move_east, move_west, jump]
+
+jobs:
+  update-marble:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .marble_state.json
+            README.md
+
+      - name: Calculate Physics
+        id: physics
+        run: |
+          sudo apt-get install -y bc
+
+          # Load state
+          if [ -f ".marble_state.json" ]; then
+            X=$(jq -r '.x // 0' .marble_state.json)
+            Y=$(jq -r '.y // 0' .marble_state.json)
+            Z=$(jq -r '.z // 0' .marble_state.json)
+            VX=$(jq -r '.vx // 0' .marble_state.json)
+            VZ=$(jq -r '.vz // 0' .marble_state.json)
+          else
+            X=0; Y=0; Z=0; VX=0; VZ=0
+          fi
+
+          ACTION="${{ github.event.action || github.event.client_payload.action || github.event.inputs.action }}"
+          
+          # Constants
+          FRICTION=0.8
+          IMPULSE=2.5
+          GRAVITY=-1.5
+
+          # Apply Impulse based on direction
+          case $ACTION in
+            move_north) VZ=$(echo "$VZ - $IMPULSE" | bc) ;;
+            move_south) VZ=$(echo "$VZ + $IMPULSE" | bc) ;;
+            move_east)  VX=$(echo "$VX + $IMPULSE" | bc) ;;
+            move_west)  VX=$(echo "$VX - $IMPULSE" | bc) ;;
+            jump)       if (( $(echo "$Y <= 0" | bc -l) )); then VY=3.0; else VY=0; fi ;;
+          esac
+
+          # Apply Velocity to Position
+          NEW_X=$(echo "$X + $VX" | bc)
+          NEW_Z=$(echo "$Z + $VZ" | bc)
+          
+          # Handle Jump/Gravity logic
+          if [ "$ACTION" == "jump" ] && (( $(echo "$Y <= 0" | bc -l) )); then
+            NEW_Y=3.0
+          else
+            NEW_Y=$(echo "$Y + $GRAVITY" | bc)
+            if (( $(echo "$NEW_Y < 0" | bc -l) )); then NEW_Y=0; fi
+          fi
+
+          # Apply Friction to Velocity for next turn
+          NEW_VX=$(echo "$VX * $FRICTION" | bc)
+          NEW_VZ=$(echo "$VZ * $FRICTION" | bc)
+
+          echo "X=$NEW_X" >> $GITHUB_OUTPUT
+          echo "Y=$NEW_Y" >> $GITHUB_OUTPUT
+          echo "Z=$NEW_Z" >> $GITHUB_OUTPUT
+          
+          echo "{\"x\": $NEW_X, \"y\": $NEW_Y, \"z\": $NEW_Z, \"vx\": $NEW_VX, \"vz\": $NEW_VZ}" > .marble_state.json
+
+      - name: Generate Frame
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          PROMPT="High-end 3D render, white marble sphere, dark grid. Position: x=${{ steps.physics.outputs.X }}, y=${{ steps.physics.outputs.Y }}, z=${{ steps.physics.outputs.Z }}. Motion blur on the grid to suggest movement. Isometric, ray-traced."
+          
+          RESPONSE=$(curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key=${GEMINI_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"instances\": [ { \"prompt\": \"$PROMPT\" } ],
+              \"parameters\": { \"sampleCount\": 1 }
+            }")
+          
+          echo $RESPONSE | jq -r '.predictions[0].bytesBase64Encoded' | base64 -d > frame.png
+
+      - name: Update README
+        run: |
+          cat <<EOF > README.md
+          # Marble Game
+          ![Frame](frame.png)
+          [West](?action=move_west) | [North](?action=move_north) | [South](?action=move_south) | [East](?action=move_east) | [Jump](?action=jump)
+          EOF
+
+      - name: Fast Commit
+        run: |
+          git config --global user.name "bot"
+          git config --global user.email "bot"
+          git add .marble_state.json frame.png README.md
+          git commit -m "Physics Update"
+          git push --force
