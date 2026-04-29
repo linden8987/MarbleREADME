@@ -21,92 +21,83 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            .marble_state.json
-            README.md
 
-      - name: Calculate Physics
-        id: physics
+      - name: Physics and Rendering Engine
+        id: engine
         run: |
           sudo apt-get install -y bc
 
-          # Load state
+          # Load state (Grid is 0-9)
           if [ -f ".marble_state.json" ]; then
-            X=$(jq -r '.x // 0' .marble_state.json)
-            Y=$(jq -r '.y // 0' .marble_state.json)
-            Z=$(jq -r '.z // 0' .marble_state.json)
-            VX=$(jq -r '.vx // 0' .marble_state.json)
-            VZ=$(jq -r '.vz // 0' .marble_state.json)
+            X=$(jq -r '.x // 4' .marble_state.json)
+            Z=$(jq -r '.z // 4' .marble_state.json)
           else
-            X=0; Y=0; Z=0; VX=0; VZ=0
+            X=4; Z=4
           fi
 
           ACTION="${{ github.event.action || github.event.client_payload.action || github.event.inputs.action }}"
           
-          # Constants
-          FRICTION=0.8
-          IMPULSE=2.5
-          GRAVITY=-1.5
-
-          # Apply Impulse based on direction
+          # Move Logic (Clamped between 0 and 9)
           case $ACTION in
-            move_north) VZ=$(echo "$VZ - $IMPULSE" | bc) ;;
-            move_south) VZ=$(echo "$VZ + $IMPULSE" | bc) ;;
-            move_east)  VX=$(echo "$VX + $IMPULSE" | bc) ;;
-            move_west)  VX=$(echo "$VX - $IMPULSE" | bc) ;;
-            jump)       if (( $(echo "$Y <= 0" | bc -l) )); then VY=3.0; else VY=0; fi ;;
+            move_north) Z=$(echo "$Z - 1" | bc) ;;
+            move_south) Z=$(echo "$Z + 1" | bc) ;;
+            move_east)  X=$(echo "$X + 1" | bc) ;;
+            move_west)  X=$(echo "$X - 1" | bc) ;;
           esac
 
-          # Apply Velocity to Position
-          NEW_X=$(echo "$X + $VX" | bc)
-          NEW_Z=$(echo "$Z + $VZ" | bc)
-          
-          # Handle Jump/Gravity logic
-          if [ "$ACTION" == "jump" ] && (( $(echo "$Y <= 0" | bc -l) )); then
-            NEW_Y=3.0
-          else
-            NEW_Y=$(echo "$Y + $GRAVITY" | bc)
-            if (( $(echo "$NEW_Y < 0" | bc -l) )); then NEW_Y=0; fi
-          fi
+          # Clamping to grid boundaries
+          if (( $(echo "$X < 0" | bc -l) )); then X=0; fi
+          if (( $(echo "$X > 9" | bc -l) )); then X=9; fi
+          if (( $(echo "$Z < 0" | bc -l) )); then Z=0; fi
+          if (( $(echo "$Z > 9" | bc -l) )); then Z=9; fi
 
-          # Apply Friction to Velocity for next turn
-          NEW_VX=$(echo "$VX * $FRICTION" | bc)
-          NEW_VZ=$(echo "$VZ * $FRICTION" | bc)
+          # Save state
+          echo "{\"x\": $X, \"z\": $Z}" > .marble_state.json
 
-          echo "X=$NEW_X" >> $GITHUB_OUTPUT
-          echo "Y=$NEW_Y" >> $GITHUB_OUTPUT
-          echo "Z=$NEW_Z" >> $GITHUB_OUTPUT
+          # --- RENDER ENGINE ---
+          # We build the grid using ⬛ for floor and ⚪ for the marble
+          SCREEN=""
+          for row in {0..9}
+          do
+            LINE=""
+            for col in {0..9}
+            do
+              if [ "$row" -eq "$Z" ] && [ "$col" -eq "$X" ]; then
+                LINE="${LINE}⚪"
+              else
+                LINE="${LINE}⬛"
+              fi
+            done
+            SCREEN="${SCREEN}${LINE}<br>"
+          done
           
-          echo "{\"x\": $NEW_X, \"y\": $NEW_Y, \"z\": $NEW_Z, \"vx\": $NEW_VX, \"vz\": $NEW_VZ}" > .marble_state.json
-
-      - name: Generate Frame
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          PROMPT="High-end 3D render, white marble sphere, dark grid. Position: x=${{ steps.physics.outputs.X }}, y=${{ steps.physics.outputs.Y }}, z=${{ steps.physics.outputs.Z }}. Motion blur on the grid to suggest movement. Isometric, ray-traced."
-          
-          RESPONSE=$(curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key=${GEMINI_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"instances\": [ { \"prompt\": \"$PROMPT\" } ],
-              \"parameters\": { \"sampleCount\": 1 }
-            }")
-          
-          echo $RESPONSE | jq -r '.predictions[0].bytesBase64Encoded' | base64 -d > frame.png
+          # Use a heredoc to save the screen to output without escaping issues
+          echo "SCREEN_DATA<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$SCREEN" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "X=$X" >> $GITHUB_OUTPUT
+          echo "Z=$Z" >> $GITHUB_OUTPUT
 
       - name: Update README
         run: |
           cat <<EOF > README.md
-          # Marble Game
-          ![Frame](frame.png)
-          [West](?action=move_west) | [North](?action=move_north) | [South](?action=move_south) | [East](?action=move_east) | [Jump](?action=jump)
+          # 🕹️ Emoji Marble Game
+          
+          ${{ steps.engine.outputs.SCREEN_DATA }}
+
+          ### Controls
+          | [⬅️ West](https://github.com/${{ github.repository }}/actions) | [⬆️ North](https://github.com/${{ github.repository }}/actions) | [⬇️ South](https://github.com/${{ github.repository }}/actions) | [➡️ East](https://github.com/${{ github.repository }}/actions) |
+          | :---: | :---: | :---: | :---: |
+
+          **Position:** X: ${{ steps.engine.outputs.X }}, Z: ${{ steps.engine.outputs.Z }}
+          
+          *Click 'Actions' and run the workflow to move!*
           EOF
 
-      - name: Fast Commit
+      - name: Commit Changes
         run: |
-          git config --global user.name "bot"
-          git config --global user.email "bot"
-          git add .marble_state.json frame.png README.md
-          git commit -m "Physics Update"
-          git push --force
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add .marble_state.json README.md
+          git commit -m "Marble moved to ${{ steps.engine.outputs.X }}, ${{ steps.engine.outputs.Z }}"
+          git push
